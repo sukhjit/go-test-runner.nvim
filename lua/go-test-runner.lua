@@ -1,13 +1,17 @@
 local M = {
+  -- Base go test commands; append the run pattern and import path at call time
   go_file_test_path = "/usr/bin/go test -test.fullpath=true -timeout 30s -run '^",
   go_function_test_path = '/usr/bin/go test -test.fullpath=true -timeout 30s -run ^',
   go_package_test_path = '/usr/bin/go test -test.fullpath=true -timeout 30s',
 
+  -- Default keymaps (can be overridden via setup())
   function_test_cmd = '<leader>tr',
   file_test_cmd = '<leader>tf',
   package_test_cmd = '<leader>tp',
 }
 
+-- Register buffer-local keymaps. Call this from your plugin config, e.g.
+--   require('go-test-runner').setup({ function_test_cmd = '<leader>rt' })
 function M.setup(opts)
   opts = opts or {}
 
@@ -17,36 +21,22 @@ function M.setup(opts)
 
   vim.keymap.set('n', function_test_cmd, M.run_function_test, {
     desc = 'Test Go function',
-    buffer = true,
     silent = true,
   })
 
   vim.keymap.set('n', file_test_cmd, M.run_file_test, {
     desc = 'Test Go file',
-    buffer = true,
     silent = true,
   })
 
   vim.keymap.set('n', package_test_cmd, M.run_package_test, {
     desc = 'Test Go package',
-    buffer = true,
     silent = true,
   })
 end
 
-function M.get_go_package_name(bufnr)
-  bufnr = bufnr or vim.api.nvim_get_current_buf()
-  local parser = vim.treesitter.get_parser(bufnr, 'go')
-  local tree = parser:parse()
-  local root = tree[1]:root()
-
-  local query = vim.treesitter.query.parse('go', '(package_clause (package_identifier) @name)')
-  for _, node in query:iter_captures(root, bufnr) do
-    return vim.treesitter.get_node_text(node, bufnr)
-  end
-end
-
--- get golang module name by finding and parsing go.mod from the current file's directory
+-- Returns the module name declared in the nearest go.mod, searched upward
+-- from the current file's directory. Returns nil if no go.mod is found.
 function M.get_go_module_name(bufnr)
   bufnr = bufnr or vim.api.nvim_get_current_buf()
   local filepath = vim.api.nvim_buf_get_name(bufnr)
@@ -65,6 +55,9 @@ function M.get_go_module_name(bufnr)
   end
 end
 
+-- Returns the relative package path from the module root to the current
+-- file's directory (e.g. "internal/foo"). Returns "" when the file sits
+-- directly in the module root, or nil if no go.mod is found.
 function M.get_go_package_path(bufnr)
   bufnr = bufnr or vim.api.nvim_get_current_buf()
   local filepath = vim.api.nvim_buf_get_name(bufnr)
@@ -83,10 +76,14 @@ function M.get_go_package_path(bufnr)
     return ''
   end
 
+  -- Strip the module root prefix to get the relative path
   local rel = abs_dir:sub(#mod_dir + 2)
   return rel
 end
 
+-- Walks the TreeSitter tree upward from the cursor to find the enclosing
+-- function or method declaration. Returns the function name, or nil if the
+-- cursor is not inside any function.
 function M.get_function_name_at_cursor(bufnr)
   bufnr = bufnr or vim.api.nvim_get_current_buf()
   local cursor = vim.api.nvim_win_get_cursor(0)
@@ -108,16 +105,25 @@ function M.get_function_name_at_cursor(bufnr)
   return nil
 end
 
--- assume that test cases inside a test table are in the form of
--- for _, tc := range []struct{
---   name string
---   want string
--- }{
---   {name: "test1", want: "a"},
---   {name: "test2", want: "b"},
--- } {
---   t.Run(tc.name, func(t *testing.T) { ...})
--- }
+-- Returns the test case name at the cursor position, or nil if none is found.
+--
+-- Two patterns are recognised:
+--
+-- 1. Table-driven tests — cursor is inside a struct literal entry that has a
+--    "name" field. The expected node hierarchy is:
+--      short_var_declaration
+--        expression_list
+--          composite_literal
+--            literal_value          <- outer slice literal
+--              literal_element
+--                literal_value      <- one struct entry, e.g. {name: "foo", ...}
+--                  literal_element
+--                    keyed_element  <- name: "foo"
+--
+-- 2. t.Run calls — cursor is inside a t.Run("name", ...) call expression.
+--
+-- Spaces in the returned name are replaced with underscores to match Go's
+-- sub-test naming convention.
 function M.get_test_case_name_at_cursor(bufnr)
   bufnr = bufnr or vim.api.nvim_get_current_buf()
   local cursor = vim.api.nvim_win_get_cursor(0)
@@ -129,33 +135,45 @@ function M.get_test_case_name_at_cursor(bufnr)
   while node do
     local node_type = node:type()
 
-    local par1 = node:parent()
-    local par2 = par1 and par1:parent()
-    local par3 = par2 and par2:parent()
-    local par4 = par3 and par3:parent()
-    local par5 = par4 and par4:parent()
+    -- Pattern 1: table-driven test struct entry
+    if node_type == 'literal_value' then
+      local par1 = node:parent()
+      local par2 = par1 and par1:parent()
+      local par3 = par2 and par2:parent()
+      local par4 = par3 and par3:parent()
+      local par5 = par4 and par4:parent()
 
-    if
-      node_type == 'literal_value'
-      and par1:type() == 'literal_element'
-      and par2:type() == 'literal_value'
-      and par3:type() == 'composite_literal'
-      and par4:type() == 'expression_list'
-      and par5:type() == 'short_var_declaration'
-    then
-      local child_1 = node:child(1)
-
-      local child_1_name = vim.treesitter.get_node_text(child_1:child(0), bufnr)
-      if child_1_name == 'name' then
-        return vim.treesitter.get_node_text(child_1:child(2), bufnr)
+      if
+        par1
+        and par1:type() == 'literal_element'
+        and par2
+        and par2:type() == 'literal_value'
+        and par3
+        and par3:type() == 'composite_literal'
+        and par4
+        and par4:type() == 'expression_list'
+        and par5
+        and par5:type() == 'short_var_declaration'
+      then
+        -- child(0) = '{', child(1) = first literal_element (keyed_element), child(2) = ':'  value
+        local child_1 = node:child(1)
+        if child_1 then
+          local key_node = child_1:child(0)
+          local val_node = child_1:child(2)
+          if key_node and val_node and vim.treesitter.get_node_text(key_node, bufnr) == 'name' then
+            local name = vim.treesitter.get_node_text(val_node, bufnr)
+            return name:sub(2, -2):gsub(' ', '_') -- strip quotes
+          end
+        end
       end
     end
 
-    -- Stop searching once we exit the enclosing test function
+    -- Stop walking once we leave the enclosing test function
     if node_type == 'function_declaration' or node_type == 'method_declaration' then
       break
     end
 
+    -- Pattern 2: t.Run("name", func(t *testing.T) { ... })
     if node_type == 'call_expression' then
       local func_node = node:field('function')[1]
       if func_node and func_node:type() == 'selector_expression' then
@@ -163,12 +181,12 @@ function M.get_test_case_name_at_cursor(bufnr)
         if field_node and vim.treesitter.get_node_text(field_node, bufnr) == 'Run' then
           local args_node = node:field('arguments')[1]
           if args_node then
-            -- child(0) is '(', child(1) is first argument
+            -- argument_list layout: '(' [arg, ',', arg, ...] ')'
+            -- child(0) = '(', child(1) = first argument (the sub-test name)
             local first_arg = args_node:child(1)
             if first_arg and (first_arg:type() == 'interpreted_string_literal' or first_arg:type() == 'raw_string_literal') then
               local name_with_quotes = vim.treesitter.get_node_text(first_arg, bufnr)
-              -- Strip surrounding quotes and replace spaces with underscores (Go test behaviour)
-              return name_with_quotes:sub(2, -2):gsub(' ', '_')
+              return name_with_quotes:sub(2, -2):gsub(' ', '_') -- strip quotes
             end
           end
         end
@@ -181,10 +199,50 @@ function M.get_test_case_name_at_cursor(bufnr)
   return nil
 end
 
-function M.print_and_run_cmd(cmd)
-  vim.cmd('split | terminal sh -c ' .. vim.fn.shellescape('echo Running: ' .. cmd .. ' && printf "\\n" && exec ' .. cmd))
+-- Opens a floating terminal window centred on the screen and runs the given
+-- shell command string inside it. The window closes automatically 3 seconds
+-- after the command exits successfully.
+function M.open_floating_terminal(command)
+  local buf = vim.api.nvim_create_buf(false, true)
+
+  local width = math.floor(vim.o.columns * 0.8)
+  local height = math.floor(vim.o.lines * 0.6)
+  local row = math.floor((vim.o.lines - height) / 2)
+  local col = math.floor((vim.o.columns - width) / 2)
+
+  local win_id = vim.api.nvim_open_win(buf, true, {
+    relative = 'editor',
+    row = row,
+    col = col,
+    width = width,
+    height = height,
+    border = 'rounded',
+    style = 'minimal',
+  })
+
+  vim.fn.jobstart(command, {
+    term = true,
+    stdout_buffered = true,
+    on_exit = function(_, exit_code, _)
+      if exit_code == 0 then
+        -- Close the window 3 s after a successful run
+        vim.defer_fn(function()
+          if vim.api.nvim_win_is_valid(win_id) then
+            vim.api.nvim_win_close(win_id, false)
+          end
+        end, 3000)
+      end
+    end,
+  })
 end
 
+-- Prints the command to stdout then executes it in a floating terminal.
+function M.print_and_run_cmd(cmd)
+  local c = 'sh -c ' .. vim.fn.shellescape('echo Running: ' .. cmd .. ' && printf "\\n" && exec ' .. cmd)
+  M.open_floating_terminal(c)
+end
+
+-- Runs all tests in the package that contains the current file.
 function M.run_package_test()
   local bufnr = vim.api.nvim_get_current_buf()
 
@@ -197,17 +255,18 @@ function M.run_package_test()
   M.print_and_run_cmd(cmd)
 end
 
+-- Runs all Test* functions in the current file by collecting their names via
+-- TreeSitter and building a combined -run pattern.
 function M.run_file_test()
   local bufnr = vim.api.nvim_get_current_buf()
   local parser = vim.treesitter.get_parser(bufnr)
 
-  local query_string = '(function_declaration) @name'
-
-  local query = vim.treesitter.query.parse(parser:lang(), query_string)
+  local query = vim.treesitter.query.parse(parser:lang(), '(function_declaration) @name')
 
   local tree = parser:parse()
   local root = tree[1]:root()
 
+  -- Collect every top-level function whose name starts with "Test"
   local funcs = {}
   for _, node in query:iter_captures(root, bufnr) do
     if node:type() == 'function_declaration' then
@@ -226,6 +285,7 @@ function M.run_file_test()
     return
   end
 
+  -- Build: go test -run '^(TestFoo|TestBar)$' <import_path>
   local funcs_string = table.concat(funcs, '|')
 
   local module_name = M.get_go_module_name(bufnr)
@@ -237,6 +297,9 @@ function M.run_file_test()
   M.print_and_run_cmd(cmd)
 end
 
+-- Runs the test function (and optionally a specific sub-test) at the cursor.
+-- If the cursor is inside a table-driven test entry or a t.Run call, the
+-- sub-test name is appended to produce a pattern like ^TestFoo/my_case$.
 function M.run_function_test()
   local bufnr = vim.api.nvim_get_current_buf()
 
@@ -257,6 +320,7 @@ function M.run_function_test()
   local pkg_path = M.get_go_package_path(bufnr)
   local import_path = pkg_path ~= '' and (module_name .. '/' .. pkg_path) or module_name
 
+  -- Append sub-test name when the cursor is inside a specific test case
   local run_pattern = func_name
   if test_case_name then
     run_pattern = func_name .. '/' .. test_case_name
