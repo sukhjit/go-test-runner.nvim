@@ -52,6 +52,7 @@ Open a Go test file and use the following keymaps:
 | `<leader>tr` | Run test function (or sub-test) at cursor |
 | `<leader>tf` | Run all tests in current file             |
 | `<leader>tp` | Run all tests in current package          |
+| `q`          | Close the floating output window          |
 
 ### Sub-test detection
 

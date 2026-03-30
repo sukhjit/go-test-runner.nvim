@@ -199,47 +199,85 @@ function M.get_test_case_name_at_cursor(bufnr)
   return nil
 end
 
--- Opens a floating terminal window centred on the screen and runs the given
--- shell command string inside it. The window closes automatically 3 seconds
--- after the command exits successfully.
-function M.open_floating_terminal(command)
-  local buf = vim.api.nvim_create_buf(false, true)
-
-  local width = math.floor(vim.o.columns * 0.8)
-  local height = math.floor(vim.o.lines * 0.6)
-  local row = math.floor((vim.o.lines - height) / 2)
-  local col = math.floor((vim.o.columns - width) / 2)
-
-  local win_id = vim.api.nvim_open_win(buf, true, {
-    relative = 'editor',
-    row = row,
-    col = col,
-    width = width,
-    height = height,
-    border = 'rounded',
-    style = 'minimal',
-  })
-
-  vim.fn.jobstart(command, {
-    term = true,
-    stdout_buffered = true,
-    on_exit = function(_, exit_code, _)
-      if exit_code == 0 then
-        -- Close the window 3 s after a successful run
-        vim.defer_fn(function()
-          if vim.api.nvim_win_is_valid(win_id) then
-            vim.api.nvim_win_close(win_id, false)
-          end
-        end, 3000)
+-- Appends non-empty lines from data to buf, scheduled on the main loop so it
+-- is safe to call from a libuv callback (stdout/stderr handler).
+local function schedule_output(buf, data)
+  if data then
+    vim.schedule(function()
+      for _, line in ipairs(vim.split(data, '\n')) do
+        if line ~= '' then
+          vim.api.nvim_buf_set_lines(buf, -1, -1, false, { line })
+        end
       end
-    end,
-  })
+    end)
+  end
 end
 
--- Prints the command to stdout then executes it in a floating terminal.
-function M.print_and_run_cmd(cmd)
-  local c = 'sh -c ' .. vim.fn.shellescape('echo Running: ' .. cmd .. ' && printf "\\n" && exec ' .. cmd)
-  M.open_floating_terminal(c)
+-- Schedules automatic window closure 3 seconds after a successful command exit.
+-- Does nothing when the command exits with a non-zero code so the output stays
+-- visible for inspection.
+local function schedule_exit(win, result)
+  vim.schedule(function()
+    if not vim.api.nvim_win_is_valid(win) then
+      return
+    end
+
+    if result.code ~= 0 then
+      -- command failed
+      return
+    end
+
+    -- close window after 3 seconds
+    vim.defer_fn(function()
+      if vim.api.nvim_win_is_valid(win) then
+        vim.api.nvim_win_close(win, true)
+      end
+    end, 3000)
+  end)
+end
+
+-- Opens a centred floating terminal window, writes the command being run, and
+-- streams its stdout/stderr into the buffer in real time. Press 'q' to close
+-- the window manually; it also closes automatically on success (see
+-- schedule_exit).
+function M.open(cmd)
+  local width = math.floor(vim.o.columns * 0.8)
+  local height = math.floor(vim.o.lines * 0.8)
+  local col = math.floor((vim.o.columns - width) / 2)
+  local row = math.floor((vim.o.lines - height) / 2)
+
+  local buf = vim.api.nvim_create_buf(false, true)
+  local win = vim.api.nvim_open_win(buf, true, {
+    relative = 'editor',
+    width = width,
+    height = height,
+    col = col,
+    row = row,
+    style = 'minimal',
+    border = 'rounded',
+    title = ' Running ',
+    title_pos = 'center',
+  })
+
+  vim.api.nvim_buf_set_lines(buf, 0, -1, false, { 'Running: ' .. cmd, '' })
+
+  local parts = vim.split(cmd, ' ')
+  vim.system(parts, {
+    stdout = function(_, data)
+      schedule_output(buf, data)
+    end,
+    stderr = function(_, data)
+      schedule_output(buf, data)
+    end,
+  }, function(result)
+    schedule_exit(win, result)
+  end)
+
+  vim.keymap.set('n', 'q', function()
+    if vim.api.nvim_win_is_valid(win) then
+      vim.api.nvim_win_close(win, true)
+    end
+  end, { buffer = buf, noremap = true })
 end
 
 -- Runs all tests in the package that contains the current file.
@@ -252,7 +290,7 @@ function M.run_package_test()
 
   local cmd = M.go_package_test_path .. ' ' .. import_path
 
-  M.print_and_run_cmd(cmd)
+  M.open(cmd)
 end
 
 -- Runs all Test* functions in the current file by collecting their names via
@@ -294,7 +332,7 @@ function M.run_file_test()
 
   local cmd = M.go_file_test_path .. '(' .. funcs_string .. ")$' " .. import_path
 
-  M.print_and_run_cmd(cmd)
+  M.open(cmd)
 end
 
 -- Runs the test function (and optionally a specific sub-test) at the cursor.
@@ -328,7 +366,7 @@ function M.run_function_test()
 
   local cmd = M.go_function_test_path .. run_pattern .. '$ ' .. import_path
 
-  M.print_and_run_cmd(cmd)
+  M.open(cmd)
 end
 
 return M
