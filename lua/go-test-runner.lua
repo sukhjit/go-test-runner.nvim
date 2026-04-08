@@ -240,7 +240,7 @@ end
 -- streams its stdout/stderr into the buffer in real time. Press 'q' to close
 -- the window manually; it also closes automatically on success (see
 -- schedule_exit).
-function M.open(cmd)
+function M.open(cmd, test_type)
   local width = math.floor(vim.o.columns * 0.8)
   local height = math.floor(vim.o.lines * 0.8)
   local col = math.floor((vim.o.columns - width) / 2)
@@ -255,7 +255,7 @@ function M.open(cmd)
     row = row,
     style = 'minimal',
     border = 'rounded',
-    title = ' Running ',
+    title = ' Running ' .. test_type,
     title_pos = 'center',
   })
 
@@ -290,7 +290,7 @@ function M.run_package_test()
 
   local cmd = M.go_package_test_path .. ' ' .. import_path
 
-  M.open(cmd)
+  M.open(cmd, 'Package')
 end
 
 -- Runs all Test* functions in the current file by collecting their names via
@@ -332,7 +332,7 @@ function M.run_file_test()
 
   local cmd = M.go_file_test_path .. '(' .. funcs_string .. ")$' " .. import_path
 
-  M.open(cmd)
+  M.open(cmd, 'File')
 end
 
 -- Runs the test function (and optionally a specific sub-test) at the cursor.
@@ -360,13 +360,15 @@ function M.run_function_test()
 
   -- Append sub-test name when the cursor is inside a specific test case
   local run_pattern = func_name
+  local test_type = 'Function'
   if test_case_name then
     run_pattern = func_name .. '/' .. test_case_name
+    test_type = 'Test Case'
   end
 
   local cmd = M.go_function_test_path .. run_pattern .. '$ ' .. import_path
 
-  M.open(cmd)
+  M.open(cmd, test_type)
 end
 
 return M
